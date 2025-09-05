@@ -1,43 +1,54 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 import pandas as pd
 import joblib
 from sklearn.metrics.pairwise import cosine_similarity
+from typing import Optional
+import traceback
+import numpy as np
 
 app = FastAPI()
 
-movies = pd.read_pickle('data/processed_movies.pkl')
+movies = pd.read_pickle('data/enriched_movies.pkl')
 content_embeddings = joblib.load('models/content_embeddings.pkl')
+movies['title'] = movies['title'].str.lower().str.strip()
 
 @app.get("/recommend/")
-def recommend(title: str, n: int = 10):
+def recommend(
+    title: str,
+    n: int = 10
+):
     try:
-        filtered = movies[movies['title'].str.lower().str.strip() == title.lower().strip()]
+        title_norm = title.lower().strip()
+        filtered = movies[movies['title'] == title_norm]
         if filtered.empty:
             return {"recommendations": [], "error": "Movie not found."}
 
-        row_pos = filtered.iloc[0]['row_pos']
-        if row_pos < 0 or row_pos >= content_embeddings.shape[0]:
-            return {"recommendations": [], "error": "Movie index mapping error."}
-
+        row_pos = filtered.index[0]
         movie_emb = content_embeddings[row_pos].reshape(1, -1)
         sims = cosine_similarity(content_embeddings, movie_emb).flatten()
-        ranked = sims.argsort()[::-1]
+        sims = np.nan_to_num(sims, nan=0.0, posinf=0.0, neginf=0.0)
 
-        recs = []
-        count = 0
-        for i in ranked:
-            if i == row_pos:
-                continue
-            rec_movie = movies.iloc[i]
-            recs.append({
-                "title": rec_movie['title'],
-                "genres": "|".join(rec_movie['genres']),
+        sims_filtered = [(i, sims[i]) for i in range(len(movies)) if i != row_pos]
+        sims_filtered.sort(key=lambda x: x[1], reverse=True)
+
+        recommendations = []
+        for idx, score in sims_filtered[:n]:
+            rec = movies.iloc[idx]
+            genres = rec['genres']
+            if isinstance(genres, list):
+                genres_str = "|".join(genres)
+            else:
+                genres_str = ""
+            recommendations.append({
+                "title": rec['title'].title(),
+                "genres": genres_str,
+                "director": "Unknown",
+                "actors": "Unknown",
+                "similarity": round(float(score), 4)
             })
-            count += 1
-            if count >= n:
-                break
 
-        return {"recommendations": recs}
-
+        return {"recommendations": recommendations}
     except Exception as e:
+        print("Exception in recommend endpoint:", e)
+        traceback.print_exc()
         return {"recommendations": [], "error": f"Server Exception: {str(e)}"}
